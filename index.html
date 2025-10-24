@@ -6337,7 +6337,7 @@
                     const orderId = '#ORD' + Math.floor(100000 + Math.random() * 900000);
                     const returnUrl = window.location.origin + window.location.pathname; // absolute URL to this page
                     // Build an absolute URL to the mock gateway relative to the current page
-                    const target = new URL('admin..html', window.location.href);
+                    const target = new URL('payment_gateway.html', window.location.href);
                     target.searchParams.set('amount', amount.toFixed(2));
                     target.searchParams.set('order', orderId);
                     target.searchParams.set('return_url', returnUrl);
