@@ -1,0 +1,444 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>bKash/Nagad Payment Simulator</title>
+    <!-- Load Tailwind CSS for modern, responsive styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Custom styles to mimic the bKash/Nagad button color */
+        .bkash-bg { background-color: #e2136e; }
+        .bkash-bg:hover { background-color: #c70e5c; }
+        .font-inter { font-family: 'Inter', sans-serif; }
+    </style>
+    <!-- Firebase SDK Imports -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, onSnapshot, runTransaction, connectFirestoreEmulator, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        
+        // --- Global Variables and Initialization ---
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : { projectId: 'demo-project' };
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        // Initialize Firebase App
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+        const auth = getAuth(app);
+        
+        // Set Firestore Log Level (Optional, for debugging)
+        setLogLevel('Debug');
+
+        // Firestore paths
+        const FUNDS_DOC_PATH = `/artifacts/${appId}/public/data/global_state/funds`;
+        const INITIAL_GLOBAL_FUNDS = 10000000000; // 1000 Crore BDT
+
+        // Global state for use in the main script block
+        window.firebaseData = {
+            db: db,
+            auth: auth,
+            FUNDS_DOC_PATH: FUNDS_DOC_PATH,
+            INITIAL_GLOBAL_FUNDS: INITIAL_GLOBAL_FUNDS,
+            initialAuthToken: initialAuthToken,
+            appId: appId
+        };
+
+        // Function to handle Firebase Auth (called in main script)
+        window.initializeFirebaseAndAuth = async () => {
+            try {
+                if (window.firebaseData.initialAuthToken) {
+                    await signInWithCustomToken(auth, window.firebaseData.initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+                // Check if the global funds document exists, if not, create it
+                await setInitialFunds(db, FUNDS_DOC_PATH, INITIAL_GLOBAL_FUNDS);
+                return auth.currentUser.uid;
+            } catch (error) {
+                console.error("Firebase Auth or Initialization Error:", error);
+                return null;
+            }
+        };
+
+        // Function to initialize the funds document
+        async function setInitialFunds(db, docPath, initialAmount) {
+            const fundsRef = doc(db, docPath);
+            try {
+                // Use a transaction to safely check and set
+                await runTransaction(db, async (transaction) => {
+                    const docSnapshot = await transaction.get(fundsRef);
+                    if (!docSnapshot.exists()) {
+                        console.log("Creating initial global funds document.");
+                        transaction.set(fundsRef, { 
+                            currentAmount: initialAmount,
+                            lastUpdated: new Date().getTime()
+                        });
+                    }
+                });
+            } catch (e) {
+                console.error("Error initializing funds:", e);
+            }
+        }
+    </script>
+</head>
+<body class="bg-gray-100 flex justify-center items-center min-h-screen p-4 font-inter">
+
+    <div id="payment-container" class="bg-white p-8 rounded-xl shadow-2xl w-full max-w-sm text-center">
+        
+        <div class="header mb-6">
+            <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/c/c0/Bkash_logo.svg/1200px-Bkash_logo.svg.png" 
+                 alt="bKash Logo" 
+                 class="logo w-24 mx-auto mb-4 rounded-lg">
+            
+            <!-- Global Fund Display -->
+            <div class="bg-blue-100 p-3 mb-4 rounded-lg border border-blue-300">
+                <p class="text-sm text-blue-800 font-semibold">মোট অবশিষ্ট ফান্ড (Demo):</p>
+                <span id="global-fund-display" class="text-xl font-extrabold text-blue-600">৳ Loading...</span>
+            </div>
+
+            <!-- Dynamic Display of Amount next to the Title -->
+            <div class="flex justify-between items-center mb-4 p-3 bg-pink-100 rounded-lg border border-pink-300"> 
+                <h2 class="text-xl font-bold text-gray-800 mr-2">মোট অ্যামাউন্ট</h2>
+                <span id="display-amount" class="text-2xl font-extrabold text-pink-600">৳ 0.00</span>
+            </div>
+
+            <!-- Hidden inputs -->
+            <input type="hidden" id="amount" value="0.00"> 
+            <input type="hidden" id="generated-otp" value=""> 
+        </div>
+        
+        <div class="payment-form">
+            
+            <!-- Step 1: Phone Number Input -->
+            <div id="step-1" class="input-step">
+                <div class="input-group mb-4 text-left">
+                    <label for="phone" class="block font-medium text-gray-700 mb-1">ফোন নম্বর</label>
+                    <input type="text" id="phone" placeholder="যেমন: 01XXXXXXXXX" maxlength="11"
+                           class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-pink-500 transition">
+                </div>
+                <button id="next-to-pin-btn" class="w-full py-3 bkash-bg text-white font-bold text-lg rounded-lg transition duration-300 shadow-md">
+                    পরবর্তী (NEXT)
+                </button>
+            </div>
+            
+            <!-- Step 2: PIN Input -->
+            <div id="step-2" class="input-step hidden">
+                <div class="input-group mb-4 text-left">
+                    <label for="pin" class="block font-medium text-gray-700 mb-1">পিন (PIN)</label>
+                    <input type="password" id="pin" placeholder="আপনার পিন দিন"
+                           class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-pink-500 transition">
+                </div>
+                <button id="next-to-otp-btn" class="w-full py-3 bkash-bg text-white font-bold text-lg rounded-lg transition duration-300 shadow-md">
+                    পিন যাচাই করুন
+                </button>
+            </div>
+
+            <!-- Step 3: OTP Input -->
+            <div id="step-3" class="input-step hidden">
+                <p id="otp-hint" class="text-sm text-center text-gray-600 mb-4 p-2 bg-yellow-100 rounded-lg"></p>
+                <div class="input-group mb-4 text-left">
+                    <label for="otp" class="block font-medium text-gray-700 mb-1">OTP (৪-সংখ্যার পিন)</label>
+                    <input type="text" id="otp" placeholder="আপনার OTP দিন" maxlength="4"
+                           class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-pink-500 transition">
+                </div>
+                <button id="complete-payment-btn" class="w-full py-3 bkash-bg text-white font-bold text-lg rounded-lg transition duration-300 shadow-md">
+                    পেমেন্ট সম্পন্ন করুন
+                </button>
+                <button id="back-to-pin-btn" class="w-full py-2 mt-2 text-gray-500 hover:text-gray-700">
+                    ফিরে যান
+                </button>
+            </div>
+
+        </div>
+
+        <div id="status-message" class="status-message mt-6 p-3 rounded-lg hidden"></div>
+    </div>
+
+    <script type="module">
+        // Import necessary components from the script module block above
+        import { getFirestore, doc, onSnapshot, runTransaction } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        document.addEventListener('DOMContentLoaded', async () => {
+            const firebaseData = window.firebaseData;
+            const db = firebaseData.db;
+            const FUNDS_DOC_PATH = firebaseData.FUNDS_DOC_PATH;
+
+            const nextToPinBtn = document.getElementById('next-to-pin-btn');
+            const nextToOtpBtn = document.getElementById('next-to-otp-btn');
+            const completePaymentBtn = document.getElementById('complete-payment-btn');
+            const backToPinBtn = document.getElementById('back-to-pin-btn');
+            
+            const phoneInput = document.getElementById('phone');
+            const pinInput = document.getElementById('pin');
+            const otpInput = document.getElementById('otp');
+            const amountInput = document.getElementById('amount');
+            const generatedOtpInput = document.getElementById('generated-otp');
+            
+            const displayAmountSpan = document.getElementById('display-amount');
+            const globalFundDisplay = document.getElementById('global-fund-display');
+            const statusMessage = document.getElementById('status-message');
+            const otpHint = document.getElementById('otp-hint');
+            const container = document.getElementById('payment-container');
+
+            let currentStep = 1;
+            let currentUserId = null;
+
+            // Initialize Firebase Authentication
+            currentUserId = await window.initializeFirebaseAndAuth();
+
+            // --- Firestore Real-time Listener for Global Fund ---
+            if (db && currentUserId) {
+                onSnapshot(doc(db, FUNDS_DOC_PATH), (docSnap) => {
+                    if (docSnap.exists()) {
+                        const data = docSnap.data();
+                        const fundAmount = data.currentAmount;
+                        globalFundDisplay.textContent = `৳ ${fundAmount.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+                    } else {
+                        globalFundDisplay.textContent = '৳ N/A';
+                    }
+                });
+            }
+
+            // --- Utility Functions ---
+            function getUrlParameter(name) {
+                const urlParams = new URLSearchParams(window.location.search);
+                return urlParams.get(name);
+            }
+
+            // Function to generate a unique, alphanumeric transaction ID
+            function generateTransactionId() {
+                // Generates a 12-character alphanumeric ID (e.g., TRXF6C2A9B8D)
+                const prefix = 'TRX'; 
+                // Using crypto.randomUUID for better randomness, or fall back to Math.random()
+                const randomPart = Math.random().toString(36).substring(2, 11).toUpperCase();
+                return prefix + randomPart;
+            }
+
+            function showMessage(message, type) {
+                statusMessage.innerHTML = message; // Use innerHTML to allow for bolding/line breaks
+                statusMessage.classList.remove('hidden', 'bg-green-100', 'text-green-700', 'bg-red-100', 'text-red-700', 'bg-yellow-100', 'text-yellow-700');
+                statusMessage.className = 'status-message mt-6 p-3 rounded-lg block transition duration-300 font-bold whitespace-pre-wrap'; // Added whitespace-pre-wrap for \n
+                
+                if (type === 'success') {
+                    statusMessage.classList.add('bg-green-100', 'text-green-700');
+                } else if (type === 'error') {
+                    statusMessage.classList.add('bg-red-100', 'text-red-700');
+                } else {
+                     statusMessage.classList.add('bg-yellow-100', 'text-yellow-700');
+                }
+            }
+            
+            function generateRandomOTP() {
+                return String(Math.floor(1000 + Math.random() * 9000)); // Generates 4-digit number
+            }
+            
+            function updateStepVisibility() {
+                document.getElementById('step-1').classList.add('hidden');
+                document.getElementById('step-2').classList.add('hidden');
+                document.getElementById('step-3').classList.add('hidden');
+                statusMessage.classList.add('hidden');
+                container.classList.remove('border-4', 'border-green-400', 'border-red-400');
+
+                if (currentStep === 1) {
+                    document.getElementById('step-1').classList.remove('hidden');
+                } else if (currentStep === 2) {
+                    document.getElementById('step-2').classList.remove('hidden');
+                    pinInput.value = ''; // Clear PIN on entry
+                    pinInput.focus();
+                } else if (currentStep === 3) {
+                    document.getElementById('step-3').classList.remove('hidden');
+                    otpInput.value = ''; // Clear OTP on entry
+                    otpInput.focus();
+                }
+            }
+
+            // --- Dynamic Amount and Return URL Setup ---
+            const urlAmount = getUrlParameter('amount');
+            const returnUrl = getUrlParameter('return_url'); // Fetch the return URL
+            const defaultAmount = '100.00'; 
+            let finalAmount = defaultAmount;
+
+            if (urlAmount && !isNaN(parseFloat(urlAmount)) && parseFloat(urlAmount) > 0) {
+                finalAmount = parseFloat(urlAmount).toFixed(2);
+            } 
+            
+            amountInput.value = finalAmount; 
+            displayAmountSpan.textContent = `৳ ${finalAmount}`; 
+            // --- End Dynamic Amount and Return URL Setup ---
+
+            // --- Step Navigation Logic ---
+
+            // Step 1: Phone -> PIN
+            nextToPinBtn.addEventListener('click', async () => {
+                const phoneNumber = phoneInput.value.trim();
+                
+                if (phoneNumber.length !== 11 || isNaN(phoneNumber)) {
+                    showMessage('সঠিক ১১-সংখ্যার ফোন নম্বর দিন।', 'error');
+                    return;
+                }
+
+                // Simulate loading
+                nextToPinBtn.textContent = 'লোড হচ্ছে...';
+                await new Promise(resolve => setTimeout(resolve, 500));
+                nextToPinBtn.textContent = 'পরবর্তী (NEXT)';
+
+                currentStep = 2;
+                updateStepVisibility();
+                showMessage(`পিন দিন: ${phoneNumber} অ্যাকাউন্টের জন্য।`, 'info');
+            });
+
+            // Step 2: PIN -> OTP
+            nextToOtpBtn.addEventListener('click', async () => {
+                const pin = pinInput.value.trim();
+                
+                if (pin === '') {
+                    showMessage('অনুগ্রহ করে পিন দিন।', 'error');
+                    return;
+                }
+                
+                // Dummy PIN validation
+                if (pin !== '12345') {
+                     showMessage('ভুল পিন। অনুগ্রহ করে আবার চেষ্টা করুন। (Demo Pin: 12345)', 'error');
+                     return;
+                }
+                
+                // Generate and store OTP
+                const newOtp = generateRandomOTP();
+                generatedOtpInput.value = newOtp;
+                
+                // Simulate sending OTP
+                nextToOtpBtn.textContent = 'OTP তৈরি হচ্ছে...';
+                await new Promise(resolve => setTimeout(resolve, 1000));
+                nextToOtpBtn.textContent = 'পিন যাচাই করুন';
+
+                currentStep = 3;
+                updateStepVisibility();
+                otpHint.textContent = `Demo OTP: ${newOtp} (এটি আপনার মোবাইলে পাঠানো হয়েছে)`;
+                showMessage(`OTP দিন: ৳${amountInput.value} পেমেন্ট নিশ্চিত করতে।`, 'info');
+            });
+
+            // Step 3: OTP -> Complete Payment
+            completePaymentBtn.addEventListener('click', async () => {
+                const otp = otpInput.value.trim();
+                const expectedOtp = generatedOtpInput.value;
+                const paymentAmount = parseFloat(amountInput.value);
+
+                if (otp === '') {
+                    showMessage('অনুগ্রহ করে OTP দিন।', 'error');
+                    return;
+                }
+                
+                if (otp !== expectedOtp) {
+                    showMessage('ভুল OTP। অনুগ্রহ করে সঠিক OTP দিন।', 'error');
+                    return;
+                }
+                
+                // 1. Simulate Loading State
+                completePaymentBtn.textContent = 'পেমেন্ট হচ্ছে...';
+                completePaymentBtn.disabled = true;
+                completePaymentBtn.classList.add('opacity-70');
+                showMessage('পেমেন্ট প্রক্রিয়া চলছে। অনুগ্রহ করে অপেক্ষা করুন...', 'info');
+
+                // 2. Simulate Server Transaction Delay
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                
+                // 3. Firestore Transaction to Decrement Fund
+                let success = false;
+                let transactionId = '';
+                let failureReason = '';
+                
+                try {
+                    await runTransaction(db, async (transaction) => {
+                        const fundsRef = doc(db, FUNDS_DOC_PATH);
+                        const docSnap = await transaction.get(fundsRef);
+
+                        if (!docSnap.exists()) {
+                            throw "Global funds record missing!";
+                        }
+                        
+                        const currentAmount = docSnap.data().currentAmount || 0;
+                        const newAmount = currentAmount - paymentAmount;
+                        
+                        if (newAmount < 0) {
+                            failureReason = "insufficient_fund";
+                            throw "Insufficient demo funds in global account.";
+                        }
+                        
+                        // Generate Transaction ID inside the transaction logic
+                        transactionId = generateTransactionId(); 
+
+                        transaction.update(fundsRef, { 
+                            currentAmount: newAmount,
+                            lastUpdated: new Date().getTime() 
+                        });
+                        success = true;
+                    });
+                } catch (e) {
+                    console.error("Transaction failed: ", e);
+                    if (!failureReason) {
+                        failureReason = "gateway_error";
+                    }
+                    success = false;
+                }
+
+                // 4. Update UI based on transaction result
+                if (success) {
+                    // Final success message with Transaction ID
+                    const successMessage = `৳${paymentAmount.toFixed(2)} সফলভাবে পরিশোধ করা হয়েছে। ধন্যবাদ! \n\n<span class="text-xs font-normal">ট্রানজেকশন আইডি (TxnID):</span> <span class="text-pink-600">${transactionId}</span>`;
+                    showMessage(successMessage, 'success');
+                    container.classList.add('border-4', 'border-green-400');
+                } else {
+                    showMessage('পেমেন্ট ব্যর্থ। ট্রানজেকশন বাতিল হয়েছে।', 'error');
+                    container.classList.add('border-4', 'border-red-400');
+                }
+                
+                // 5. Handle Redirect (Callback to main website)
+                if (returnUrl) {
+                    let redirectUrl = new URL(returnUrl);
+                    
+                    if (success) {
+                        redirectUrl.searchParams.set('status', 'success');
+                        redirectUrl.searchParams.set('amount', paymentAmount.toFixed(2));
+                        redirectUrl.searchParams.set('txn_id', transactionId);
+                    } else {
+                        redirectUrl.searchParams.set('status', 'failed');
+                        redirectUrl.searchParams.set('reason', failureReason || 'generic_failure');
+                    }
+
+                    // Perform the redirect after a small delay to show the result message
+                    setTimeout(() => {
+                        window.location.href = redirectUrl.toString();
+                    }, 4000); 
+                }
+                
+                // 6. Reset
+                completePaymentBtn.textContent = 'পেমেন্ট সম্পন্ন করুন';
+                completePaymentBtn.disabled = false;
+                completePaymentBtn.classList.remove('opacity-70');
+                
+                // If no return URL, reset the form after 8 seconds
+                if (!returnUrl) {
+                    setTimeout(() => {
+                        container.classList.remove('border-4', 'border-green-400', 'border-red-400');
+                        currentStep = 1;
+                        updateStepVisibility(); // Go back to step 1
+                    }, 8000); 
+                }
+
+            });
+
+            // Back button
+            backToPinBtn.addEventListener('click', () => {
+                currentStep = 2;
+                updateStepVisibility();
+                showMessage('আবার পিন দিন।', 'info');
+            });
+
+            // Initial view setup
+            updateStepVisibility(); 
+        });
+    </script>
+</body>
+</html>
